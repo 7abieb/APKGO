@@ -1,0 +1,145 @@
+# --------------------------------------------------------------------------
+# Block 1: HTTP to HTTPS Redirection
+# --------------------------------------------------------------------------
+server {
+    listen 80;
+    listen [::]:80;
+    server_name yandux.biz www.yandux.biz www1.yandux.biz;
+    return 301 https://yandux.biz$request_uri;
+}
+
+# --------------------------------------------------------------------------
+# Block 2: WWW to Non-WWW HTTPS Redirection
+# --------------------------------------------------------------------------
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name www.yandux.biz www1.yandux.biz;
+
+    # SSL Certificates (placeholders)
+    {{ssl_certificate_key}}
+    {{ssl_certificate}}
+
+    return 301 https://yandux.biz$request_uri;
+}
+
+# --------------------------------------------------------------------------
+# Block 3: Main Application Server (Proxy)
+# --------------------------------------------------------------------------
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name yandux.biz;
+
+    # Paths and Logging (placeholders)
+    {{root}}
+    {{nginx_access_log}}
+    {{nginx_error_log}}
+
+    # SSL Certificates (placeholders)
+    {{ssl_certificate_key}}
+    {{ssl_certificate}}
+
+    # Custom Settings (placeholder)
+    {{settings}}
+
+    # Location for Let's Encrypt certificate renewal
+    location ~ /.well-known {
+        auth_basic off;
+        allow all;
+    }
+
+    # Location for static assets
+    location ~* \.(css|js|jpg|jpeg|gif|png|ico|gz|svg|svgz|ttf|otf|woff|woff2|eot|mp4|ogg|ogv|webm|webp|zip|swf|map|mjs)$ {
+        add_header Access-Control-Allow-Origin "*";
+        expires max;
+        access_log off;
+    }
+
+    # Deny access to hidden files
+    location ~ /\.(ht|svn|git) {
+        deny all;
+    }
+
+    # Main location, proxies all other requests
+    location / {
+        {{varnish_proxy_pass}}
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_hide_header X-Varnish;
+        proxy_redirect off;
+        proxy_max_temp_file_size 0;
+
+        # Timeouts and Buffer settings
+        proxy_connect_timeout      720;
+        proxy_send_timeout         720;
+        proxy_read_timeout         720;
+        proxy_buffer_size          128k;
+        proxy_buffers              4 256k;
+        proxy_busy_buffers_size    256k;
+        proxy_temp_file_write_size 256k;
+    }
+}
+
+# --------------------------------------------------------------------------
+# Block 4: Backend PHP Server
+# --------------------------------------------------------------------------
+server {
+    listen 8080;
+    listen [::]:8080;
+    server_name yandux.biz www1.yandux.biz;
+
+    # Paths and index files (placeholders)
+    {{root}}
+    index index.php index.html;
+
+    # Custom 404 error page
+    error_page 404 /includes/page.php?page=404;
+    
+    # Check for static files first
+    try_files $uri $uri/ @rewrite;
+
+    # Application-specific URL rewriting
+    location @rewrite {
+        rewrite ^/([^/]+)/([^/]+)/download$ /download.php?id=$1/$2 last;
+        rewrite ^/search/?$ /search.php last;
+        rewrite ^/search/([^/]+)/?$ /search.php?keyword=$1 last;
+        
+        # --- NEW RULES FOR TOP-LEVEL CATEGORIES ---
+        # Handles /apps and /games directly.
+        # e.g., /apps -> category.php?main_category=apps
+        # e.g., /games -> category.php?main_category=games
+        rewrite ^/(apps|games)/?$ /category.php?main_category=$1 last;
+        
+        # --- RULE FOR NESTED SUB-CATEGORIES ---
+        # Handles /category/games/racing etc.
+        # e.g., /category/games/racing -> category.php?main_category=games&sub_category=racing
+        rewrite ^/category/([^/]+)(?:/([^/]+))?/?$ /category.php?main_category=$1&sub_category=$2 last;
+        
+        rewrite ^/developer/([^/]+)/?$ /developer.php?developer=$1 last;
+        rewrite ^/([^/]+)/([^/]+)$ /info.php?id=$1/$2 last;
+        rewrite ^/([a-zA-Z0-9_-]+)$ /includes/page.php?page=$1 last;
+        rewrite ^/([^/]+)$ /info.php?id=$1 last;
+    }
+
+    # PHP-FPM Processing
+    location ~ \.php$ {
+        include fastcgi_params;
+        fastcgi_intercept_errors on;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        
+        try_files $uri =404;
+
+        # Timeouts and PHP-FPM connection
+        fastcgi_read_timeout 3600;
+        fastcgi_send_timeout 3600;
+        fastcgi_param HTTPS "on";
+        fastcgi_param SERVER_PORT 443;
+        fastcgi_pass 127.0.0.1:{{php_fpm_port}};
+        fastcgi_param PHP_VALUE "{{php_settings}}";
+    }
+}
